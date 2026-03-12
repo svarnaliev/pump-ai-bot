@@ -1,10 +1,9 @@
 ccxt
 pandas
 numpy
-pandas_ta
 matplotlib
-python-telegram-bot
+python-telegram-bot==13.7
 catboost
 scikit-learn
-Flask
+flask
 gunicorn
