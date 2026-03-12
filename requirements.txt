@@ -7,3 +7,4 @@ catboost
 scikit-learn
 flask
 gunicorn
+urllib3==1.26.18
