@@ -3,6 +3,7 @@ import time
 import io
 import threading
 from datetime import datetime
+import requests  # ← добавлено для self-ping
 
 import ccxt
 import pandas as pd
@@ -318,6 +319,8 @@ def main_loop():
         print(f"Ошибка стартового сообщения: {e}")
 
     iteration = 0
+    last_self_ping = time.time()
+
     while True:
         iteration += 1
         now_str = datetime.now().strftime('%H:%M:%S')
@@ -359,8 +362,17 @@ def main_loop():
             time.sleep(1.2)
 
         print(f"[{now_str}] Итерация завершена | просканировано {scanned} пар | высокая prob: {high_prob_count}")
-        print(f"Пауза {INTERVAL_SECONDS} сек...\n")
 
+        # Self-ping каждые \~10 минут (можно изменить на iteration % 2 == 0 для чаще)
+        if time.time() - last_self_ping > 600:  # 10 минут
+            try:
+                response = requests.get("https://pump-ai-bot.onrender.com/ping", timeout=10)
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Self-ping → статус {response.status_code} ({response.text})")
+            except Exception as e:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Self-ping ошибка: {e}")
+            last_self_ping = time.time()
+
+        print(f"Пауза {INTERVAL_SECONDS} сек...\n")
         time.sleep(INTERVAL_SECONDS)
 
 
