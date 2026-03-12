@@ -6,7 +6,6 @@ from datetime import datetime
 
 import ccxt
 import pandas as pd
-import pandas_ta as ta
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -21,7 +20,7 @@ import numpy as np
 from flask import Flask
 
 # ────────────────────────────────────────────────
-# Flask keep-alive (Render требует web-сервис)
+# Flask keep-alive
 # ────────────────────────────────────────────────
 app = Flask(__name__)
 
@@ -69,7 +68,7 @@ ACTIVE_SIGNALS = []
 
 
 # ────────────────────────────────────────────────
-# Данные и фичи (с squeeze + volume creep)
+# Данные и фичи (без pandas_ta)
 # ────────────────────────────────────────────────
 def fetch_ohlcv(symbol: str, limit: int = 1500):
     try:
@@ -87,19 +86,33 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     if len(df) < MIN_DATA_LENGTH:
         return df
 
-    df['ema200'] = ta.ema(df['close'], length=200)
-    df['rsi'] = ta.rsi(df['close'], length=14)
-    df['macd'] = ta.macd(df['close'])['MACD_12_26_9']
-    bb = ta.bbands(df['close'], length=20, std=2.0)
-    df['bb_lower'] = bb.iloc[:, 0]
-    df['bb_upper'] = bb.iloc[:, 2]
+    # EMA200
+    df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
+
+    # RSI 14
+    delta = df['close'].diff(1)
+    gain = delta.where(delta > 0, 0).rolling(window=14).mean()
+    loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
+    rs = gain / loss
+    df['rsi'] = 100 - (100 / (1 + rs))
+
+    # MACD line (12,26,9)
+    ema12 = df['close'].ewm(span=12, adjust=False).mean()
+    ema26 = df['close'].ewm(span=26, adjust=False).mean()
+    df['macd'] = ema12 - ema26
+
+    # Bollinger Bands 20,2
+    sma20 = df['close'].rolling(window=20).mean()
+    std20 = df['close'].rolling(window=20).std()
+    df['bb_upper'] = sma20 + (std20 * 2)
+    df['bb_lower'] = sma20 - (std20 * 2)
     df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['close']
 
     df['price_change'] = df['close'].pct_change()
     df['volume_change'] = df['volume'].pct_change()
     df['volume_ratio'] = df['volume'] / df['volume'].rolling(25).mean()
 
-    # === СЖАТИЕ + НАКОПЛЕНИЕ ===
+    # squeeze + volume creep
     df['bb_width_min'] = df['bb_width'].rolling(40).min()
     df['is_squeeze'] = df['bb_width'] <= (df['bb_width_min'] * SQUEEZE_FACTOR)
     df['volume_sma'] = df['volume'].rolling(30).mean()
@@ -116,9 +129,11 @@ def load_or_train_model():
         os.remove(MODEL_FILE)
 
     print("Обучение модели на ранних пампах...")
-    training_pairs = ['BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT', 'XRP/USDT:USDT', 'DOGE/USDT:USDT',
-                      'TON/USDT:USDT', 'SUI/USDT:USDT', 'PEPE/USDT:USDT', 'WIF/USDT:USDT', 'BONK/USDT:USDT',
-                      'POPCAT/USDT:USDT', 'BRETT/USDT:USDT', 'FARTCOIN/USDT:USDT', 'GOAT/USDT:USDT', 'MOODENG/USDT:USDT']
+    training_pairs = [
+        'BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT', 'XRP/USDT:USDT', 'DOGE/USDT:USDT',
+        'TON/USDT:USDT', 'SUI/USDT:USDT', 'PEPE/USDT:USDT', 'WIF/USDT:USDT', 'BONK/USDT:USDT',
+        'POPCAT/USDT:USDT', 'BRETT/USDT:USDT', 'FARTCOIN/USDT:USDT', 'GOAT/USDT:USDT', 'MOODENG/USDT:USDT'
+    ]
 
     all_data = []
     for symbol in training_pairs:
@@ -130,8 +145,12 @@ def load_or_train_model():
             if df.empty: continue
             df['target'] = (df['price_change'].shift(-1) > 0.009).astype(int)
             all_data.append(df)
-        except:
+        except Exception as e:
+            print(f"Ошибка при обучении на {symbol}: {e}")
             continue
+
+    if not all_data:
+        raise ValueError("Нет данных для обучения модели!")
 
     df_all = pd.concat(all_data).dropna()
     X = df_all[FEATURES]
@@ -141,7 +160,7 @@ def load_or_train_model():
     model = CatBoostClassifier(iterations=800, depth=7, learning_rate=0.06, verbose=0)
     model.fit(X_tr, y_tr)
     acc = accuracy_score(y_te, model.predict(X_te))
-    print(f"Модель обучена | Accuracy: {acc:.4f}")
+    print(f"Модель обучена | Accuracy на тесте: {acc:.4f}")
     model.save_model(MODEL_FILE)
     return model
 
@@ -206,9 +225,7 @@ Trade: Mexc Futures
 
 Уверенность: {int(prob * 100)}%
 Объёмный всплеск: x{round(volume_ratio, 1)} (MM уже в деле!)
-Сила сигнала: {int(prob * 100 - 15)}/100"""
-
-    text += f"""
+Сила сигнала: {int(prob * 100 - 15)}/100
 
 Проверь ликвидации:
 https://www.tradingview.com/chart/?symbol=MEXC%3A{coin}USDT.P"""
@@ -240,10 +257,14 @@ def send_signal(pair: str, price: float, prob: float, vol_m: float, change: floa
     text = build_signal_text(pair, price, prob, vol_m, change, row['volume_ratio'])
     buf = create_chart(pair, price)
 
+    if buf is None:
+        print(f"Не удалось создать график для {pair}")
+        return
+
     try:
         bot.send_photo(chat_id=CHAT_ID, photo=buf, caption=text)
-        print(f"🚀 ПАМП-сигнал → {pair} ({int(prob*100)}%)")
-
+        print(f"🚀 ПАМП-сигнал отправлен → {pair} ({int(prob*100)}%)")
+        
         ACTIVE_SIGNALS.append({
             'pair': pair,
             'entry_price': price,
@@ -251,7 +272,7 @@ def send_signal(pair: str, price: float, prob: float, vol_m: float, change: floa
             'timestamp': time.time()
         })
     except Exception as e:
-        print(f"Ошибка отправки {pair}: {e}")
+        print(f"Ошибка отправки сигнала {pair}: {e}")
 
 
 def check_expired_signals():
@@ -267,8 +288,9 @@ def check_expired_signals():
                 else:
                     msg = f"⚠️ {s['pair']} тайм-аут. Закрывай на {s.get('avg_price', s['entry_price'])}"
                 bot.send_message(CHAT_ID, msg)
-            except:
-                pass
+                print(msg)
+            except Exception as e:
+                print(f"Ошибка проверки истёкшего сигнала {s['pair']}: {e}")
             to_remove.append(s)
     ACTIVE_SIGNALS = [s for s in ACTIVE_SIGNALS if s not in to_remove]
 
@@ -279,46 +301,59 @@ def update_pairs_list():
         markets = futures_exchange.load_markets(reload=True)
         futures_pairs = [s for s, m in markets.items() if m.get('swap') and 'USDT' in s and m.get('active')]
         PAIRS[:] = sorted(futures_pairs, key=lambda s: float(markets[s].get('info', {}).get('quoteVolume', 0) or 0), reverse=True)[:800]
-        print(f"Загружено {len(PAIRS)} пар")
+        print(f"Обновлён список пар: {len(PAIRS)} активных USDT-перпетуалов")
     except Exception as e:
-        print(f"Ошибка обновления пар: {e}")
+        print(f"Ошибка обновления списка пар: {e}")
 
 
 def main_loop():
     model = load_or_train_model()
     last_retrain = time.time()
 
-    bot.send_message(CHAT_ID, f"🚀 Rocket Hunter запущен на Render | {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    try:
+        bot.send_message(CHAT_ID, f"🚀 Rocket Hunter запущен на Render | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("Стартовое сообщение отправлено в Telegram")
+    except Exception as e:
+        print(f"Ошибка отправки стартового сообщения: {e}")
 
     while True:
+        current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f"[{current_time_str}] Начало итерации | Активных пар: {len(PAIRS)}")
+
         update_pairs_list()
         check_expired_signals()
 
         for pair in PAIRS[:150]:
             try:
                 df = fetch_ohlcv(pair)
-                if len(df) < MIN_DATA_LENGTH: continue
+                if len(df) < MIN_DATA_LENGTH:
+                    continue
                 df = add_features(df)
-                if df.empty: continue
+                if df.empty:
+                    continue
 
                 row = df.iloc[-1]
                 feats = row[FEATURES].values.reshape(1, -1)
                 prob = model.predict_proba(feats)[0][1]
 
-                print(f"{pair:20} prob = {prob:.4f}")
+                print(f"  {pair:20} → prob = {prob:.4f}")
 
                 if prob > PROBABILITY_THRESHOLD:
+                    print(f"  Высокая вероятность на {pair} ({prob:.4f}) → проверка фильтров...")
                     price, ch, vm = get_market_data(pair)
                     send_signal(pair, price, prob, vm, ch)
 
             except Exception as e:
-                pass
+                print(f"  Ошибка обработки {pair}: {type(e).__name__}")
+
             time.sleep(1.3)
 
         if time.time() - last_retrain > 12 * 3600:
+            print("Переобучение модели...")
             model = load_or_train_model()
             last_retrain = time.time()
 
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Итерация завершена, пауза {INTERVAL_SECONDS} сек")
         time.sleep(INTERVAL_SECONDS)
 
 
@@ -329,5 +364,5 @@ if __name__ == '__main__':
     update_pairs_list()
     threading.Thread(target=main_loop, daemon=True).start()
 
-    port = int(os.getenv("PORT", 8080))
+    port = int(os.getenv("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
