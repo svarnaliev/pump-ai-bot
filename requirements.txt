@@ -1,0 +1,10 @@
+ccxt
+pandas
+numpy
+pandas_ta
+matplotlib
+python-telegram-bot
+catboost
+scikit-learn
+Flask
+gunicorn
