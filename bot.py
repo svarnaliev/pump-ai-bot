@@ -34,19 +34,20 @@ def ping():
     return "pong"
 
 # ────────────────────────────────────────────────
-# Константы — ОСЛАБЛЕНЫ ДЛЯ РАННИХ ПАМПОВ
+# Константы — ослабленные для ранних пампов
 # ────────────────────────────────────────────────
 TIMEFRAME = '1h'
 INTERVAL_SECONDS = 900
 MODEL_FILE = 'catboost_pump_model.cbm'
+LAST_INDEX_FILE = 'last_pair_index.txt'  # файл для сохранения прогресса
 
 MIN_DATA_LENGTH = 60
-PROBABILITY_THRESHOLD = 0.52          # ← ОСЛАБЛЕНО
+PROBABILITY_THRESHOLD = 0.52
 SIGNAL_LIFETIME = 10800
 
-VOLUME_SURGE = 1.85                   # ← ОСЛАБЛЕНО
-SQUEEZE_FACTOR = 1.45                 # ← ОСЛАБЛЕНО
-VOLUME_CREEP = 1.25                   # ← ОСЛАБЛЕНО
+VOLUME_SURGE = 1.85
+SQUEEZE_FACTOR = 1.45
+VOLUME_CREEP = 1.25
 
 FEATURES = ['ema200', 'rsi', 'macd', 'bb_width', 'price_change', 'volume_change', 'volume_ratio', 'is_squeeze', 'volume_trend']
 
@@ -73,7 +74,7 @@ ACTIVE_SIGNALS = []
 # ────────────────────────────────────────────────
 def fetch_ohlcv(symbol: str, limit: int = 1500):
     try:
-        time.sleep(1.1)
+        time.sleep(0.9)  # уменьшил задержку, чтобы быстрее сканировать все пары
         bars = futures_exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=limit)
         df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -144,6 +145,9 @@ def load_or_train_model():
         except Exception as e:
             print(f"Ошибка обучения на {symbol}: {e}")
             continue
+
+    if not all_data:
+        raise ValueError("Нет данных для обучения!")
 
     df_all = pd.concat(all_data).dropna()
     X = df_all[FEATURES]
@@ -272,17 +276,35 @@ def update_pairs_list():
     try:
         markets = futures_exchange.load_markets(reload=True)
         futures_pairs = [s for s, m in markets.items() if m.get('swap') and 'USDT' in s and m.get('active')]
-        PAIRS[:] = sorted(futures_pairs, key=lambda s: float(markets[s].get('info', {}).get('quoteVolume', 0) or 0), reverse=True)[:800]
+        PAIRS[:] = sorted(futures_pairs, key=lambda s: float(markets[s].get('info', {}).get('quoteVolume', 0) or 0), reverse=True)
         print(f"Обновлён список: {len(PAIRS)} пар")
     except Exception as e:
         print(f"Ошибка обновления пар: {e}")
+
+
+def load_last_index():
+    if os.path.exists(LAST_INDEX_FILE):
+        try:
+            with open(LAST_INDEX_FILE, 'r') as f:
+                return int(f.read().strip())
+        except:
+            return 0
+    return 0
+
+
+def save_last_index(idx):
+    try:
+        with open(LAST_INDEX_FILE, 'w') as f:
+            f.write(str(idx))
+    except Exception as e:
+        print(f"Ошибка сохранения индекса: {e}")
 
 
 def main_loop():
     model = load_or_train_model()
     last_retrain = time.time()
 
-    bot.send_message(CHAT_ID, f"🚀 Rocket Hunter (ранние пампы) запущен | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    bot.send_message(CHAT_ID, f"🚀 Rocket Hunter запущен (все пары + resume) | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     iteration = 0
     last_self_ping = time.time()
@@ -290,17 +312,28 @@ def main_loop():
     while True:
         iteration += 1
         now_str = datetime.now().strftime('%H:%M:%S')
-        print(f"[{now_str}] Итерация {iteration} | пар: {len(PAIRS)}")
+        print(f"[{now_str}] Итерация {iteration} | всего пар: {len(PAIRS)}")
 
         update_pairs_list()
         check_expired_signals()
 
-        for pair in PAIRS[:250]:
+        start_idx = load_last_index()
+        print(f"[{now_str}] Продолжаем с индекса {start_idx} ({PAIRS[start_idx] if start_idx < len(PAIRS) else 'конец'})")
+
+        scanned = 0
+        high_prob_count = 0
+
+        for i, pair in enumerate(PAIRS[start_idx:]):
+            scanned += 1
             try:
                 df = fetch_ohlcv(pair)
-                if len(df) < MIN_DATA_LENGTH: continue
+                if len(df) < MIN_DATA_LENGTH:
+                    print(f"  {pair:20} → мало данных")
+                    continue
                 df = add_features(df)
-                if df.empty: continue
+                if df.empty:
+                    print(f"  {pair:20} → фичи не посчитались")
+                    continue
 
                 row = df.iloc[-1]
                 prob = model.predict_proba(row[FEATURES].values.reshape(1, -1))[0][1]
@@ -308,24 +341,32 @@ def main_loop():
                 print(f"  {pair:20} → prob={prob:.4f} | RSI={row['rsi']:.1f} | squeeze={row['is_squeeze']} | v_ratio={row['volume_ratio']:.1f} | v_trend={row['volume_trend']:.2f}")
 
                 if prob > PROBABILITY_THRESHOLD:
+                    high_prob_count += 1
+                    print(f"  >>> Высокая вероятность {pair} ({prob:.4f})")
                     price, ch, vm = get_market_data(pair)
                     send_signal(pair, price, prob, vm, ch)
 
             except Exception as e:
                 print(f"  {pair} → ошибка: {type(e).__name__}")
 
-            time.sleep(1.2)
+            # Сохраняем прогресс после каждой пары
+            current_idx = start_idx + i + 1
+            save_last_index(current_idx)
+
+            time.sleep(0.9)  # задержка между запросами
+
+        print(f"[{now_str}] Итерация завершена | просканировано {scanned} | высокая prob: {high_prob_count}")
 
         # Self-ping
         if time.time() - last_self_ping > 600:
             try:
                 r = requests.get("https://pump-ai-bot.onrender.com/ping", timeout=30)
-                print(f"[{now_str}] Self-ping → {r.status_code}")
+                print(f"[{now_str}] Self-ping → {r.status_code} ({r.text})")
             except Exception as e:
-                print(f"Self-ping ошибка: {e}")
+                print(f"[{now_str}] Self-ping ошибка: {e}")
             last_self_ping = time.time()
 
-        print(f"[{now_str}] Итерация завершена\n")
+        print(f"[{now_str}] Пауза {INTERVAL_SECONDS} сек...\n")
         time.sleep(INTERVAL_SECONDS)
 
 
