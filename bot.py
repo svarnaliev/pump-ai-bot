@@ -39,10 +39,11 @@ def ping():
 TIMEFRAME = '1h'
 INTERVAL_SECONDS = 900
 MODEL_FILE = 'catboost_pump_model.cbm'
-LAST_INDEX_FILE = 'last_pair_index.txt'  # файл для сохранения прогресса
+LAST_INDEX_FILE = 'last_pair_index.txt'
 
 MIN_DATA_LENGTH = 60
 PROBABILITY_THRESHOLD = 0.52
+HIGH_PROB_NOTIFY_THRESHOLD = 0.60     # ← если prob выше — шлём в Telegram даже без сигнала
 SIGNAL_LIFETIME = 10800
 
 VOLUME_SURGE = 1.85
@@ -74,7 +75,7 @@ ACTIVE_SIGNALS = []
 # ────────────────────────────────────────────────
 def fetch_ohlcv(symbol: str, limit: int = 1500):
     try:
-        time.sleep(0.9)  # уменьшил задержку, чтобы быстрее сканировать все пары
+        time.sleep(0.9)
         bars = futures_exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=limit)
         df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -304,7 +305,7 @@ def main_loop():
     model = load_or_train_model()
     last_retrain = time.time()
 
-    bot.send_message(CHAT_ID, f"🚀 Rocket Hunter запущен (все пары + resume) | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    bot.send_message(CHAT_ID, f"🚀 Rocket Hunter запущен (все пары + уведомления о высокой prob) | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     iteration = 0
     last_self_ping = time.time()
@@ -336,13 +337,22 @@ def main_loop():
                     continue
 
                 row = df.iloc[-1]
-                prob = model.predict_proba(row[FEATURES].values.reshape(1, -1))[0][1]
+                feats = row[FEATURES].values.reshape(1, -1)
+                prob = model.predict_proba(feats)[0][1]
 
                 print(f"  {pair:20} → prob={prob:.4f} | RSI={row['rsi']:.1f} | squeeze={row['is_squeeze']} | v_ratio={row['volume_ratio']:.1f} | v_trend={row['volume_trend']:.2f}")
 
+                # Уведомление о высокой вероятности (даже если не прошёл фильтр)
+                if prob > HIGH_PROB_NOTIFY_THRESHOLD:
+                    try:
+                        bot.send_message(CHAT_ID, f"🔥 Высокая вероятность (без фильтра): {pair}\nprob = {prob:.4f}\nRSI = {row['rsi']:.1f} | squeeze = {row['is_squeeze']}\nv_ratio = {row['volume_ratio']:.1f} | v_trend = {row['volume_trend']:.2f}")
+                        print(f"  Уведомление о высокой prob отправлено: {pair}")
+                    except Exception as e:
+                        print(f"  Ошибка уведомления о высокой prob {pair}: {e}")
+
                 if prob > PROBABILITY_THRESHOLD:
                     high_prob_count += 1
-                    print(f"  >>> Высокая вероятность {pair} ({prob:.4f})")
+                    print(f"  >>> Высокая вероятность {pair} ({prob:.4f}) → проверяем фильтры...")
                     price, ch, vm = get_market_data(pair)
                     send_signal(pair, price, prob, vm, ch)
 
@@ -353,7 +363,7 @@ def main_loop():
             current_idx = start_idx + i + 1
             save_last_index(current_idx)
 
-            time.sleep(0.9)  # задержка между запросами
+            time.sleep(0.9)
 
         print(f"[{now_str}] Итерация завершена | просканировано {scanned} | высокая prob: {high_prob_count}")
 
