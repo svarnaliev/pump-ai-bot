@@ -30,21 +30,19 @@ def home():
 def ping():
     return "pong"
 
-# ────────────────────────────────────────────────
-# Константы — ещё ослабленные для теста
-# ────────────────────────────────────────────────
+# Константы
 TIMEFRAME = '1h'
 INTERVAL_SECONDS = 600
 MODEL_FILE = 'catboost_pump_v3.cbm'
 LAST_INDEX_FILE = 'last_pair_index.txt'
 
 MIN_DATA_LENGTH = 60
-PROBABILITY_THRESHOLD = 0.45          # очень низкий — ловим чаще
-HIGH_PROB_NOTIFY_THRESHOLD = 0.50     # уведомления prob >0.50
+PROBABILITY_THRESHOLD = 0.45
+HIGH_PROB_NOTIFY_THRESHOLD = 0.50
 SIGNAL_LIFETIME = 14400
 
-VOLUME_SURGE = 1.4                    # любой заметный всплеск
-PRICE_BREAK = 0.008                   # +0.8% уже считается
+VOLUME_SURGE = 1.4
+PRICE_BREAK = 0.008
 RSI_MIN = 50
 RSI_MAX = 85
 
@@ -68,9 +66,6 @@ PAIRS = []
 ACTIVE_SIGNALS = []
 
 
-# ────────────────────────────────────────────────
-# Данные и фичи
-# ────────────────────────────────────────────────
 def fetch_ohlcv(symbol: str, limit: int = 1500):
     try:
         time.sleep(0.85)
@@ -109,9 +104,6 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     return df.dropna()
 
 
-# ────────────────────────────────────────────────
-# Модель — 40 свежих пампов за неделю
-# ────────────────────────────────────────────────
 def load_or_train_model():
     if os.path.exists(MODEL_FILE):
         model = CatBoostClassifier()
@@ -119,7 +111,6 @@ def load_or_train_model():
         return model
 
     print("Обучение на 40 свежих пампах...")
-    
     training_pairs = [
         'PEPE/USDT:USDT', 'WIF/USDT:USDT', 'BONK/USDT:USDT', 'POPCAT/USDT:USDT', 'BRETT/USDT:USDT',
         'FARTCOIN/USDT:USDT', 'GOAT/USDT:USDT', 'MOODENG/USDT:USDT', 'NEIRO/USDT:USDT', 'TRUMP/USDT:USDT',
@@ -155,8 +146,6 @@ def load_or_train_model():
     X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
     model = CatBoostClassifier(iterations=1200, depth=8, learning_rate=0.04, verbose=0)
     model.fit(X_tr, y_tr)
-    acc = accuracy_score(y_te, model.predict(X_te))
-    print(f"Модель обучена | Accuracy: {acc:.4f}")
     model.save_model(MODEL_FILE)
     return model
 
@@ -209,6 +198,22 @@ LONG на MEXC Futures
         ACTIVE_SIGNALS.append({'pair': pair, 'entry_price': price, 'timestamp': time.time()})
     except Exception as e:
         print(f"Ошибка отправки {pair}: {e}")
+
+
+def check_expired_signals():
+    global ACTIVE_SIGNALS
+    now = time.time()
+    to_remove = []
+    for s in ACTIVE_SIGNALS:
+        if now - s['timestamp'] > SIGNAL_LIFETIME:
+            try:
+                price, _, _ = get_market_data(s['pair'])
+                msg = f"✅ {s['pair']} отработал!" if price > s['entry_price'] else f"⚠️ {s['pair']} тайм-аут"
+                bot.send_message(CHAT_ID, msg)
+            except:
+                pass
+            to_remove.append(s)
+    ACTIVE_SIGNALS = [s for s in ACTIVE_SIGNALS if s not in to_remove]
 
 
 def update_pairs_list():
@@ -311,10 +316,10 @@ def main_loop():
 
             time.sleep(0.85)
 
-        # Топ-5 вероятностей за итерацию в Telegram
+        # Топ-5 вероятностей в Telegram
         if prob_list:
             top5 = sorted(prob_list, key=lambda x: x[1], reverse=True)[:5]
-            top_text = "Топ-5 вероятностей за итерацию:\n"
+            top_text = f"Топ-5 вероятностей за итерацию {iteration}:\n"
             for pair, prob, rsi, vratio in top5:
                 top_text += f"{pair}: prob={prob:.4f} | RSI={rsi:.1f} | v_ratio={vratio:.1f}\n"
             bot.send_message(CHAT_ID, top_text)
@@ -322,7 +327,7 @@ def main_loop():
 
         print(f"[{now_str}] Итерация завершена | просканировано {scanned} | уведомлений: {high_prob_count}")
 
-        # Фандинг-чек
+        # Фандинг-чек каждые 30 мин
         if time.time() - last_funding_check > 1800:
             for s in ACTIVE_SIGNALS[:]:
                 try:
