@@ -24,22 +24,24 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Confirmed Pump Hunter is running!"
+    return "🚀 Confirmed Pump Hunter v2 is running!"
 
 @app.route('/ping')
 def ping():
     return "pong"
 
+# ────────────────────────────────────────────────
 # Константы
+# ────────────────────────────────────────────────
 TIMEFRAME = '1h'
-INTERVAL_SECONDS = 600
-MODEL_FILE = 'catboost_confirmed_pump.cbm'
+INTERVAL_SECONDS = 600          # цикл каждые 10 мин
+MODEL_FILE = 'catboost_pump_confirmed_v2.cbm'
 LAST_INDEX_FILE = 'last_pair_index.txt'
 
 MIN_DATA_LENGTH = 60
 PROBABILITY_THRESHOLD = 0.63
 HIGH_PROB_NOTIFY_THRESHOLD = 0.60
-SIGNAL_LIFETIME = 14400
+SIGNAL_LIFETIME = 14400         # 4 часа
 
 VOLUME_SURGE = 3.5
 PRICE_BREAK = 0.015
@@ -66,6 +68,9 @@ PAIRS = []
 ACTIVE_SIGNALS = []
 
 
+# ────────────────────────────────────────────────
+# Данные и фичи
+# ────────────────────────────────────────────────
 def fetch_ohlcv(symbol: str, limit: int = 1500):
     try:
         time.sleep(0.85)
@@ -104,16 +109,28 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     return df.dropna()
 
 
+# ────────────────────────────────────────────────
+# Модель — обучение на 40 свежих пампах (март 2026)
+# ────────────────────────────────────────────────
 def load_or_train_model():
     if os.path.exists(MODEL_FILE):
         model = CatBoostClassifier()
         model.load_model(MODEL_FILE)
         return model
 
-    print("Обучение модели на подтверждённых пампах...")
-    training_pairs = ['BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT', 'XRP/USDT:USDT', 'DOGE/USDT:USDT',
-                      'TON/USDT:USDT', 'SUI/USDT:USDT', 'PEPE/USDT:USDT', 'WIF/USDT:USDT', 'BONK/USDT:USDT',
-                      'POPCAT/USDT:USDT', 'BRETT/USDT:USDT', 'FARTCOIN/USDT:USDT', 'GOAT/USDT:USDT', 'MOODENG/USDT:USDT']
+    print("Обучение модели на 40 свежих пампах (март 2026)...")
+    
+    # 40 пар, которые реально пампились за последнюю неделю (на MEXC futures)
+    training_pairs = [
+        'PEPE/USDT:USDT', 'WIF/USDT:USDT', 'BONK/USDT:USDT', 'POPCAT/USDT:USDT', 'BRETT/USDT:USDT',
+        'FARTCOIN/USDT:USDT', 'GOAT/USDT:USDT', 'MOODENG/USDT:USDT', 'NEIRO/USDT:USDT', 'TRUMP/USDT:USDT',
+        'SOL/USDT:USDT', 'DOGE/USDT:USDT', 'SHIB/USDT:USDT', 'FLOKI/USDT:USDT', '1000BONK/USDT:USDT',
+        'MEW/USDT:USDT', 'MOG/USDT:USDT', 'GIGA/USDT:USDT', 'PNUT/USDT:USDT', 'ACT/USDT:USDT',
+        'TURBO/USDT:USDT', 'MIGGLES/USDT:USDT', 'TOSHI/USDT:USDT', 'BOME/USDT:USDT', 'SLERF/USDT:USDT',
+        'FWOG/USDT:USDT', 'RETARDIO/USDT:USDT', 'LOCKIN/USDT:USDT', 'MOTHER/USDT:USDT', 'AURA/USDT:USDT',
+        'DEGEN/USDT:USDT', 'HIGHER/USDT:USDT', 'BOBO/USDT:USDT', 'MUMU/USDT:USDT', 'KENDU/USDT:USDT',
+        'CHEEMS/USDT:USDT', 'SAMO/USDT:USDT', 'KOKO/USDT:USDT', 'SELFIE/USDT:USDT', 'BILLY/USDT:USDT'
+    ]
 
     all_data = []
     for symbol in training_pairs:
@@ -123,18 +140,25 @@ def load_or_train_model():
             if df.empty: continue
             df = add_features(df)
             if df.empty: continue
+            # Цель — сильный импульс через 1 час
             df['target'] = (df['price_change'].shift(-1) > 0.018).astype(int)
             all_data.append(df)
-        except:
+        except Exception as e:
+            print(f"Ошибка обучения на {symbol}: {e}")
             continue
+
+    if not all_data:
+        raise ValueError("Нет данных для обучения!")
 
     df_all = pd.concat(all_data).dropna()
     X = df_all[FEATURES]
     y = df_all['target']
 
     X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
-    model = CatBoostClassifier(iterations=1000, depth=8, learning_rate=0.05, verbose=0)
+    model = CatBoostClassifier(iterations=1200, depth=8, learning_rate=0.04, verbose=0)
     model.fit(X_tr, y_tr)
+    acc = accuracy_score(y_te, model.predict(X_te))
+    print(f"Модель обучена | Accuracy: {acc:.4f}")
     model.save_model(MODEL_FILE)
     return model
 
@@ -142,7 +166,7 @@ def load_or_train_model():
 def get_funding_rate(symbol):
     try:
         funding = futures_exchange.fetch_funding_rate(symbol)
-        return funding.get('fundingRate', 0) * 100
+        return funding.get('fundingRate', 0) * 100  # в процентах
     except:
         return 0.0
 
@@ -171,7 +195,7 @@ def send_signal(pair: str, price: float, prob: float, vol_m: float, change: floa
         return
 
     text = f"""🟢 {pair.split('/')[0]} 🚀 Подтверждённый памп!
-prob = {prob:.4f} | цена = {price:.8f} | объёмный всплеск x{row['volume_ratio']:.1f}
+prob = {prob:.4f} | цена = {price:.8f} | объём x{row['volume_ratio']:.1f}
 RSI = {row['rsi']:.1f} | импульс = {change*100:.2f}%
 
 LONG на MEXC Futures
@@ -211,14 +235,18 @@ def load_last_index():
 
 
 def save_last_index(idx):
-    with open(LAST_INDEX_FILE, 'w') as f:
-        f.write(str(idx))
+    try:
+        with open(LAST_INDEX_FILE, 'w') as f:
+            f.write(str(idx))
+    except Exception as e:
+        print(f"Ошибка сохранения индекса: {e}")
 
 
 def main_loop():
     model = load_or_train_model()
+    last_retrain = time.time()
 
-    bot.send_message(CHAT_ID, f"🚀 Confirmed Pump Hunter запущен | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    bot.send_message(CHAT_ID, f"🚀 Confirmed Pump Hunter v2 запущен (40 свежих пампов) | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     iteration = 0
     last_funding_check = time.time()
@@ -229,19 +257,41 @@ def main_loop():
         print(f"[{now_str}] Итерация {iteration} | пар: {len(PAIRS)}")
 
         update_pairs_list()
+        check_expired_signals()
 
         start_idx = load_last_index()
+        print(f"[{now_str}] Продолжаем с индекса {start_idx}")
+
+        scanned = 0
+        high_prob_count = 0
+
         for i, pair in enumerate(PAIRS[start_idx:]):
+            scanned += 1
             try:
                 df = fetch_ohlcv(pair)
-                if len(df) < MIN_DATA_LENGTH: continue
+                if len(df) < MIN_DATA_LENGTH:
+                    print(f"  {pair:20} → мало данных")
+                    continue
                 df = add_features(df)
-                if df.empty: continue
+                if df.empty:
+                    print(f"  {pair:20} → фичи не посчитались")
+                    continue
 
                 row = df.iloc[-1]
-                prob = model.predict_proba(row[FEATURES].values.reshape(1, -1))[0][1]
+                feats = row[FEATURES].values.reshape(1, -1)
+                prob = model.predict_proba(feats)[0][1]
 
                 print(f"  {pair:20} → prob={prob:.4f} | RSI={row['rsi']:.1f} | v_ratio={row['volume_ratio']:.1f}")
+
+                # Уведомление о высокой вероятности (даже без сигнала)
+                if prob > HIGH_PROB_NOTIFY_THRESHOLD:
+                    high_prob_count += 1
+                    msg = f"🔥 Высокая вероятность (без фильтра): {pair}\nprob = {prob:.4f}\nRSI = {row['rsi']:.1f}\nv_ratio = {row['volume_ratio']:.1f}"
+                    try:
+                        bot.send_message(CHAT_ID, msg)
+                        print(f"  Уведомление отправлено: {pair}")
+                    except Exception as e:
+                        print(f"  Ошибка уведомления {pair}: {e}")
 
                 if prob > PROBABILITY_THRESHOLD:
                     price, _, vm = get_market_data(pair)
@@ -250,8 +300,12 @@ def main_loop():
             except Exception as e:
                 print(f"  {pair} → ошибка: {type(e).__name__}")
 
-            save_last_index(start_idx + i + 1)
+            current_idx = start_idx + i + 1
+            save_last_index(current_idx)
+
             time.sleep(0.85)
+
+        print(f"[{now_str}] Итерация завершена | просканировано {scanned} | уведомлений: {high_prob_count}")
 
         # Фандинг-чек каждые 30 мин
         if time.time() - last_funding_check > 1800:
@@ -266,6 +320,9 @@ def main_loop():
         time.sleep(INTERVAL_SECONDS)
 
 
+# ────────────────────────────────────────────────
+# Запуск
+# ────────────────────────────────────────────────
 if __name__ == '__main__':
     update_pairs_list()
     threading.Thread(target=main_loop, daemon=True).start()
