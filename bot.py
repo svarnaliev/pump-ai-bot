@@ -24,29 +24,29 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Confirmed Pump Hunter v2 is running!"
+    return "🚀 Confirmed Pump Hunter v3 is running!"
 
 @app.route('/ping')
 def ping():
     return "pong"
 
 # ────────────────────────────────────────────────
-# Константы
+# Константы — ещё ослабленные для теста
 # ────────────────────────────────────────────────
 TIMEFRAME = '1h'
-INTERVAL_SECONDS = 600          # цикл каждые 10 мин
-MODEL_FILE = 'catboost_pump_confirmed_v2.cbm'
+INTERVAL_SECONDS = 600
+MODEL_FILE = 'catboost_pump_v3.cbm'
 LAST_INDEX_FILE = 'last_pair_index.txt'
 
 MIN_DATA_LENGTH = 60
-PROBABILITY_THRESHOLD = 0.63
-HIGH_PROB_NOTIFY_THRESHOLD = 0.60
-SIGNAL_LIFETIME = 14400         # 4 часа
+PROBABILITY_THRESHOLD = 0.45          # очень низкий — ловим чаще
+HIGH_PROB_NOTIFY_THRESHOLD = 0.50     # уведомления prob >0.50
+SIGNAL_LIFETIME = 14400
 
-VOLUME_SURGE = 3.5
-PRICE_BREAK = 0.015
-RSI_MIN = 55
-RSI_MAX = 78
+VOLUME_SURGE = 1.4                    # любой заметный всплеск
+PRICE_BREAK = 0.008                   # +0.8% уже считается
+RSI_MIN = 50
+RSI_MAX = 85
 
 FEATURES = ['ema200', 'rsi', 'macd', 'bb_width', 'price_change', 'volume_change', 'volume_ratio']
 
@@ -110,7 +110,7 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ────────────────────────────────────────────────
-# Модель — обучение на 40 свежих пампах (март 2026)
+# Модель — 40 свежих пампов за неделю
 # ────────────────────────────────────────────────
 def load_or_train_model():
     if os.path.exists(MODEL_FILE):
@@ -118,9 +118,8 @@ def load_or_train_model():
         model.load_model(MODEL_FILE)
         return model
 
-    print("Обучение модели на 40 свежих пампах (март 2026)...")
+    print("Обучение на 40 свежих пампах...")
     
-    # 40 пар, которые реально пампились за последнюю неделю (на MEXC futures)
     training_pairs = [
         'PEPE/USDT:USDT', 'WIF/USDT:USDT', 'BONK/USDT:USDT', 'POPCAT/USDT:USDT', 'BRETT/USDT:USDT',
         'FARTCOIN/USDT:USDT', 'GOAT/USDT:USDT', 'MOODENG/USDT:USDT', 'NEIRO/USDT:USDT', 'TRUMP/USDT:USDT',
@@ -140,7 +139,6 @@ def load_or_train_model():
             if df.empty: continue
             df = add_features(df)
             if df.empty: continue
-            # Цель — сильный импульс через 1 час
             df['target'] = (df['price_change'].shift(-1) > 0.018).astype(int)
             all_data.append(df)
         except Exception as e:
@@ -166,7 +164,7 @@ def load_or_train_model():
 def get_funding_rate(symbol):
     try:
         funding = futures_exchange.fetch_funding_rate(symbol)
-        return funding.get('fundingRate', 0) * 100  # в процентах
+        return funding.get('fundingRate', 0) * 100
     except:
         return 0.0
 
@@ -246,7 +244,7 @@ def main_loop():
     model = load_or_train_model()
     last_retrain = time.time()
 
-    bot.send_message(CHAT_ID, f"🚀 Confirmed Pump Hunter v2 запущен (40 свежих пампов) | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    bot.send_message(CHAT_ID, f"🚀 Confirmed Pump Hunter v3 запущен (все 4 пункта) | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     iteration = 0
     last_funding_check = time.time()
@@ -264,6 +262,7 @@ def main_loop():
 
         scanned = 0
         high_prob_count = 0
+        prob_list = []  # для топ-5
 
         for i, pair in enumerate(PAIRS[start_idx:]):
             scanned += 1
@@ -283,7 +282,7 @@ def main_loop():
 
                 print(f"  {pair:20} → prob={prob:.4f} | RSI={row['rsi']:.1f} | v_ratio={row['volume_ratio']:.1f}")
 
-                # Уведомление о высокой вероятности (даже без сигнала)
+                # Уведомление о высокой вероятности
                 if prob > HIGH_PROB_NOTIFY_THRESHOLD:
                     high_prob_count += 1
                     msg = f"🔥 Высокая вероятность (без фильтра): {pair}\nprob = {prob:.4f}\nRSI = {row['rsi']:.1f}\nv_ratio = {row['volume_ratio']:.1f}"
@@ -293,6 +292,9 @@ def main_loop():
                     except Exception as e:
                         print(f"  Ошибка уведомления {pair}: {e}")
 
+                # Собираем для топ-5
+                prob_list.append((pair, prob, row['rsi'], row['volume_ratio']))
+
                 if prob > PROBABILITY_THRESHOLD:
                     price, _, vm = get_market_data(pair)
                     send_signal(pair, price, prob, vm, row['price_change'])
@@ -300,14 +302,27 @@ def main_loop():
             except Exception as e:
                 print(f"  {pair} → ошибка: {type(e).__name__}")
 
+            # Прогресс каждые 50 пар
+            if scanned % 50 == 0:
+                print(f"  Прогресс: обработано {scanned} пар из {len(PAIRS)} | последняя {pair}")
+
             current_idx = start_idx + i + 1
             save_last_index(current_idx)
 
             time.sleep(0.85)
 
+        # Топ-5 вероятностей за итерацию в Telegram
+        if prob_list:
+            top5 = sorted(prob_list, key=lambda x: x[1], reverse=True)[:5]
+            top_text = "Топ-5 вероятностей за итерацию:\n"
+            for pair, prob, rsi, vratio in top5:
+                top_text += f"{pair}: prob={prob:.4f} | RSI={rsi:.1f} | v_ratio={vratio:.1f}\n"
+            bot.send_message(CHAT_ID, top_text)
+            print("Топ-5 отправлен в Telegram")
+
         print(f"[{now_str}] Итерация завершена | просканировано {scanned} | уведомлений: {high_prob_count}")
 
-        # Фандинг-чек каждые 30 мин
+        # Фандинг-чек
         if time.time() - last_funding_check > 1800:
             for s in ACTIVE_SIGNALS[:]:
                 try:
