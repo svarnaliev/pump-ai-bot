@@ -24,27 +24,27 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Confirmed Pump Hunter v3 is running!"
+    return "🚀 Confirmed Pump Hunter v3.1 is running!"
 
 @app.route('/ping')
 def ping():
     return "pong"
 
-# Константы
+# Константы — МАКСИМАЛЬНО ОСЛАБЛЕННЫЕ ДЛЯ ТЕСТА
 TIMEFRAME = '1h'
 INTERVAL_SECONDS = 600
-MODEL_FILE = 'catboost_pump_v3.cbm'
+MODEL_FILE = 'catboost_pump_v3.1.cbm'
 LAST_INDEX_FILE = 'last_pair_index.txt'
 
 MIN_DATA_LENGTH = 60
-PROBABILITY_THRESHOLD = 0.45
-HIGH_PROB_NOTIFY_THRESHOLD = 0.50
+PROBABILITY_THRESHOLD = 0.35           # почти всё, что выше 35%
+HIGH_PROB_NOTIFY_THRESHOLD = 0.40      # уведомления prob > 40%
 SIGNAL_LIFETIME = 14400
 
-VOLUME_SURGE = 1.4
-PRICE_BREAK = 0.008
-RSI_MIN = 50
-RSI_MAX = 85
+VOLUME_SURGE = 1.2                     # любой всплеск
+PRICE_BREAK = 0.005                    # +0.5% уже памп
+RSI_MIN = 40
+RSI_MAX = 90
 
 FEATURES = ['ema200', 'rsi', 'macd', 'bb_width', 'price_change', 'volume_change', 'volume_ratio']
 
@@ -249,7 +249,7 @@ def main_loop():
     model = load_or_train_model()
     last_retrain = time.time()
 
-    bot.send_message(CHAT_ID, f"🚀 Confirmed Pump Hunter v3 запущен (все 4 пункта) | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    bot.send_message(CHAT_ID, f"🚀 Confirmed Pump Hunter v3.1 запущен (макс агрессия) | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     iteration = 0
     last_funding_check = time.time()
@@ -267,7 +267,7 @@ def main_loop():
 
         scanned = 0
         high_prob_count = 0
-        prob_list = []  # для топ-5
+        prob_list = []
 
         for i, pair in enumerate(PAIRS[start_idx:]):
             scanned += 1
@@ -287,7 +287,6 @@ def main_loop():
 
                 print(f"  {pair:20} → prob={prob:.4f} | RSI={row['rsi']:.1f} | v_ratio={row['volume_ratio']:.1f}")
 
-                # Уведомление о высокой вероятности
                 if prob > HIGH_PROB_NOTIFY_THRESHOLD:
                     high_prob_count += 1
                     msg = f"🔥 Высокая вероятность (без фильтра): {pair}\nprob = {prob:.4f}\nRSI = {row['rsi']:.1f}\nv_ratio = {row['volume_ratio']:.1f}"
@@ -297,7 +296,6 @@ def main_loop():
                     except Exception as e:
                         print(f"  Ошибка уведомления {pair}: {e}")
 
-                # Собираем для топ-5
                 prob_list.append((pair, prob, row['rsi'], row['volume_ratio']))
 
                 if prob > PROBABILITY_THRESHOLD:
@@ -307,7 +305,6 @@ def main_loop():
             except Exception as e:
                 print(f"  {pair} → ошибка: {type(e).__name__}")
 
-            # Прогресс каждые 50 пар
             if scanned % 50 == 0:
                 print(f"  Прогресс: обработано {scanned} пар из {len(PAIRS)} | последняя {pair}")
 
@@ -316,8 +313,8 @@ def main_loop():
 
             time.sleep(0.85)
 
-        # Топ-5 вероятностей в Telegram
-        if prob_list:
+        # Топ-5 в Telegram каждые 3 итерации
+        if prob_list and iteration % 3 == 0:
             top5 = sorted(prob_list, key=lambda x: x[1], reverse=True)[:5]
             top_text = f"Топ-5 вероятностей за итерацию {iteration}:\n"
             for pair, prob, rsi, vratio in top5:
@@ -327,7 +324,6 @@ def main_loop():
 
         print(f"[{now_str}] Итерация завершена | просканировано {scanned} | уведомлений: {high_prob_count}")
 
-        # Фандинг-чек каждые 30 мин
         if time.time() - last_funding_check > 1800:
             for s in ACTIVE_SIGNALS[:]:
                 try:
@@ -340,9 +336,6 @@ def main_loop():
         time.sleep(INTERVAL_SECONDS)
 
 
-# ────────────────────────────────────────────────
-# Запуск
-# ────────────────────────────────────────────────
 if __name__ == '__main__':
     update_pairs_list()
     threading.Thread(target=main_loop, daemon=True).start()
