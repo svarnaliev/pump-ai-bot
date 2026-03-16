@@ -24,25 +24,27 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Confirmed Pump Hunter v3.1 is running!"
+    return "🚀 Pump Hunter (дамп-версия + улучшения) is running!"
 
 @app.route('/ping')
 def ping():
     return "pong"
 
-# Константы — МАКСИМАЛЬНО ОСЛАБЛЕННЫЕ ДЛЯ ТЕСТА
+# ────────────────────────────────────────────────
+# Константы — агрессивно ослабленные
+# ────────────────────────────────────────────────
 TIMEFRAME = '1h'
 INTERVAL_SECONDS = 600
-MODEL_FILE = 'catboost_pump_v3.1.cbm'
+MODEL_FILE = 'catboost_pump_dump.cbm'
 LAST_INDEX_FILE = 'last_pair_index.txt'
 
 MIN_DATA_LENGTH = 60
-PROBABILITY_THRESHOLD = 0.35           # почти всё, что выше 35%
-HIGH_PROB_NOTIFY_THRESHOLD = 0.40      # уведомления prob > 40%
+PROBABILITY_THRESHOLD = 0.35          # очень низко — ловим всё
+HIGH_PROB_NOTIFY_THRESHOLD = 0.40     # уведомления prob >40%
 SIGNAL_LIFETIME = 14400
 
-VOLUME_SURGE = 1.2                     # любой всплеск
-PRICE_BREAK = 0.005                    # +0.5% уже памп
+VOLUME_SURGE = 1.2                    # любой всплеск
+PRICE_BREAK = 0.005                   # +0.5% уже ок
 RSI_MIN = 40
 RSI_MAX = 90
 
@@ -55,21 +57,31 @@ MEXC_API_SECRET = os.getenv('MEXC_API_SECRET')
 
 bot = Bot(token=TELEGRAM_TOKEN)
 
-futures_exchange = ccxt.mexc({
+# Публичный обменник без ключа — только для load_markets
+public_exchange = ccxt.mexc({
+    'enableRateLimit': True,
+    'options': {'defaultType': 'swap'}
+})
+
+# Приватный — для фандинга и других приватных запросов
+private_exchange = ccxt.mexc({
     'apiKey': MEXC_API_KEY,
     'secret': MEXC_API_SECRET,
     'enableRateLimit': True,
-    'options': {'defaultType': 'swap'},
+    'options': {'defaultType': 'swap', 'adjustForTimeDifference': True, 'recvWindow': 10000}
 })
 
 PAIRS = []
 ACTIVE_SIGNALS = []
 
 
+# ────────────────────────────────────────────────
+# Данные и фичи
+# ────────────────────────────────────────────────
 def fetch_ohlcv(symbol: str, limit: int = 1500):
     try:
         time.sleep(0.85)
-        bars = futures_exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=limit)
+        bars = public_exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=limit)
         df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         return df
@@ -104,6 +116,9 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     return df.dropna()
 
 
+# ────────────────────────────────────────────────
+# Модель — 40 свежих пампов
+# ────────────────────────────────────────────────
 def load_or_train_model():
     if os.path.exists(MODEL_FILE):
         model = CatBoostClassifier()
@@ -152,7 +167,7 @@ def load_or_train_model():
 
 def get_funding_rate(symbol):
     try:
-        funding = futures_exchange.fetch_funding_rate(symbol)
+        funding = private_exchange.fetch_funding_rate(symbol)
         return funding.get('fundingRate', 0) * 100
     except:
         return 0.0
@@ -200,31 +215,56 @@ LONG на MEXC Futures
         print(f"Ошибка отправки {pair}: {e}")
 
 
-def check_expired_signals():
-    global ACTIVE_SIGNALS
-    now = time.time()
-    to_remove = []
-    for s in ACTIVE_SIGNALS:
-        if now - s['timestamp'] > SIGNAL_LIFETIME:
-            try:
-                price, _, _ = get_market_data(s['pair'])
-                msg = f"✅ {s['pair']} отработал!" if price > s['entry_price'] else f"⚠️ {s['pair']} тайм-аут"
-                bot.send_message(CHAT_ID, msg)
-            except:
-                pass
-            to_remove.append(s)
-    ACTIVE_SIGNALS = [s for s in ACTIVE_SIGNALS if s not in to_remove]
+def create_chart(pair: str, entry_price: float):
+    df = fetch_ohlcv(pair)
+    if df.empty: return None
+    df = add_features(df)
+    if df.empty: return None
+
+    tp1 = round(entry_price * 1.08, 6)
+    tp2 = round(entry_price * 1.15, 6)
+    stop = round(entry_price * 0.94, 6)
+
+    fig, ax = plt.subplots(figsize=(10, 6), facecolor='#0d1117')
+    ax.plot(df['timestamp'], df['close'], color='#00ff9d', linewidth=2)
+    ax.axhline(entry_price, color='white', linestyle='--', label='Вход')
+    ax.axhline(tp1, color='#00ff00', label='Цель 1')
+    ax.axhline(tp2, color='#00cc00', label='Цель 2')
+    ax.axhline(stop, color='red', linestyle='--', label='Стоп')
+
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%d %b %H:%M'))
+    plt.xticks(rotation=45)
+    ax.grid(True, alpha=0.15)
+    ax.set_title(f'{pair} — ПАМП', color='white')
+    ax.legend(loc='upper left')
+    ax.tick_params(colors='white')
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', facecolor='#0d1117', bbox_inches='tight', dpi=130)
+    buf.seek(0)
+    plt.close(fig)
+    return buf
 
 
 def update_pairs_list():
     global PAIRS
     try:
-        markets = futures_exchange.load_markets(reload=True)
+        public_exchange.load_time_difference()
+        print("Время синхронизировано")
+        markets = public_exchange.load_markets(reload=True)
         futures_pairs = [s for s, m in markets.items() if m.get('swap') and 'USDT' in s and m.get('active')]
         PAIRS[:] = sorted(futures_pairs, key=lambda s: float(markets[s].get('info', {}).get('quoteVolume', 0) or 0), reverse=True)
         print(f"Обновлён список: {len(PAIRS)} пар")
     except Exception as e:
         print(f"Ошибка обновления пар: {e}")
+        # Fallback — если всё равно падает
+        try:
+            markets = public_exchange.load_markets(reload=True)
+            print("Fallback сработал — пары загружены")
+            futures_pairs = [s for s, m in markets.items() if m.get('swap') and 'USDT' in s and m.get('active')]
+            PAIRS[:] = sorted(futures_pairs, key=lambda s: float(markets[s].get('info', {}).get('quoteVolume', 0) or 0), reverse=True)
+        except Exception as fallback_e:
+            print(f"Fallback тоже упал: {fallback_e}")
 
 
 def load_last_index():
@@ -245,11 +285,34 @@ def save_last_index(idx):
         print(f"Ошибка сохранения индекса: {e}")
 
 
+def check_expired_signals():
+    global ACTIVE_SIGNALS
+    now = time.time()
+    to_remove = []
+    for s in ACTIVE_SIGNALS:
+        if now - s['timestamp'] > SIGNAL_LIFETIME:
+            try:
+                price, _, _ = get_market_data(s['pair'])
+                msg = f"✅ {s['pair']} отработал!" if price > s['entry_price'] else f"⚠️ {s['pair']} тайм-аут"
+                bot.send_message(CHAT_ID, msg)
+            except:
+                pass
+            to_remove.append(s)
+    ACTIVE_SIGNALS = [s for s in ACTIVE_SIGNALS if s not in to_remove]
+
+
+def get_market_data(symbol):
+    try:
+        ticker = public_exchange.fetch_ticker(symbol)
+        return ticker['last'], ticker.get('percentage', 0), round(ticker.get('quoteVolume', 0) / 1_000_000, 1)
+    except:
+        return 0.0, 0.0, 0.0
+
+
 def main_loop():
     model = load_or_train_model()
-    last_retrain = time.time()
 
-    bot.send_message(CHAT_ID, f"🚀 Confirmed Pump Hunter v3.1 запущен (макс агрессия) | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    bot.send_message(CHAT_ID, f"🚀 Pump Hunter (дамп-версия) запущен | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     iteration = 0
     last_funding_check = time.time()
@@ -313,7 +376,7 @@ def main_loop():
 
             time.sleep(0.85)
 
-        # Топ-5 в Telegram каждые 3 итерации
+        # Топ-5 каждые 3 итерации
         if prob_list and iteration % 3 == 0:
             top5 = sorted(prob_list, key=lambda x: x[1], reverse=True)[:5]
             top_text = f"Топ-5 вероятностей за итерацию {iteration}:\n"
