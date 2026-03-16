@@ -24,27 +24,27 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Pump Hunter (дамп-версия + улучшения) is running!"
+    return "🚀 Pump Hunter (стабильные публичные пары) is running!"
 
 @app.route('/ping')
 def ping():
     return "pong"
 
 # ────────────────────────────────────────────────
-# Константы — агрессивно ослабленные
+# Константы — агрессивные для теста
 # ────────────────────────────────────────────────
 TIMEFRAME = '1h'
 INTERVAL_SECONDS = 600
-MODEL_FILE = 'catboost_pump_dump.cbm'
+MODEL_FILE = 'catboost_pump_stable.cbm'
 LAST_INDEX_FILE = 'last_pair_index.txt'
 
 MIN_DATA_LENGTH = 60
-PROBABILITY_THRESHOLD = 0.35          # очень низко — ловим всё
-HIGH_PROB_NOTIFY_THRESHOLD = 0.40     # уведомления prob >40%
+PROBABILITY_THRESHOLD = 0.35
+HIGH_PROB_NOTIFY_THRESHOLD = 0.40
 SIGNAL_LIFETIME = 14400
 
-VOLUME_SURGE = 1.2                    # любой всплеск
-PRICE_BREAK = 0.005                   # +0.5% уже ок
+VOLUME_SURGE = 1.2
+PRICE_BREAK = 0.005
 RSI_MIN = 40
 RSI_MAX = 90
 
@@ -57,18 +57,18 @@ MEXC_API_SECRET = os.getenv('MEXC_API_SECRET')
 
 bot = Bot(token=TELEGRAM_TOKEN)
 
-# Публичный обменник без ключа — только для load_markets
+# ПУБЛИЧНЫЙ обменник — БЕЗ КЛЮЧЕЙ, для рынков, OHLCV, тикеров
 public_exchange = ccxt.mexc({
     'enableRateLimit': True,
     'options': {'defaultType': 'swap'}
 })
 
-# Приватный — для фандинга и других приватных запросов
+# Приватный — ТОЛЬКО для фандинга
 private_exchange = ccxt.mexc({
     'apiKey': MEXC_API_KEY,
     'secret': MEXC_API_SECRET,
     'enableRateLimit': True,
-    'options': {'defaultType': 'swap', 'adjustForTimeDifference': True, 'recvWindow': 10000}
+    'options': {'defaultType': 'swap', 'adjustForTimeDifference': True, 'recvWindow': 15000}
 })
 
 PAIRS = []
@@ -169,7 +169,8 @@ def get_funding_rate(symbol):
     try:
         funding = private_exchange.fetch_funding_rate(symbol)
         return funding.get('fundingRate', 0) * 100
-    except:
+    except Exception as e:
+        print(f"Funding ошибка для {symbol}: {e}")
         return 0.0
 
 
@@ -182,7 +183,10 @@ def send_funding_update(pair, funding_rate):
         text += "✅ Вам капает фандинг — держим позицию!"
     else:
         text += "Фандинг нейтральный."
-    bot.send_message(CHAT_ID, text)
+    try:
+        bot.send_message(CHAT_ID, text)
+    except:
+        pass
 
 
 def send_signal(pair: str, price: float, prob: float, vol_m: float, change: float):
@@ -249,22 +253,15 @@ def create_chart(pair: str, entry_price: float):
 def update_pairs_list():
     global PAIRS
     try:
-        public_exchange.load_time_difference()
-        print("Время синхронизировано")
         markets = public_exchange.load_markets(reload=True)
         futures_pairs = [s for s, m in markets.items() if m.get('swap') and 'USDT' in s and m.get('active')]
         PAIRS[:] = sorted(futures_pairs, key=lambda s: float(markets[s].get('info', {}).get('quoteVolume', 0) or 0), reverse=True)
         print(f"Обновлён список: {len(PAIRS)} пар")
     except Exception as e:
         print(f"Ошибка обновления пар: {e}")
-        # Fallback — если всё равно падает
-        try:
-            markets = public_exchange.load_markets(reload=True)
-            print("Fallback сработал — пары загружены")
-            futures_pairs = [s for s, m in markets.items() if m.get('swap') and 'USDT' in s and m.get('active')]
-            PAIRS[:] = sorted(futures_pairs, key=lambda s: float(markets[s].get('info', {}).get('quoteVolume', 0) or 0), reverse=True)
-        except Exception as fallback_e:
-            print(f"Fallback тоже упал: {fallback_e}")
+        # Если совсем упало — не крашим бот, оставляем старый список
+        if len(PAIRS) == 0:
+            print("Список пар пуст — ждём следующей итерации")
 
 
 def load_last_index():
@@ -312,7 +309,7 @@ def get_market_data(symbol):
 def main_loop():
     model = load_or_train_model()
 
-    bot.send_message(CHAT_ID, f"🚀 Pump Hunter (дамп-версия) запущен | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    bot.send_message(CHAT_ID, f"🚀 Pump Hunter запущен (публичные пары без ошибок) | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     iteration = 0
     last_funding_check = time.time()
@@ -382,8 +379,11 @@ def main_loop():
             top_text = f"Топ-5 вероятностей за итерацию {iteration}:\n"
             for pair, prob, rsi, vratio in top5:
                 top_text += f"{pair}: prob={prob:.4f} | RSI={rsi:.1f} | v_ratio={vratio:.1f}\n"
-            bot.send_message(CHAT_ID, top_text)
-            print("Топ-5 отправлен в Telegram")
+            try:
+                bot.send_message(CHAT_ID, top_text)
+                print("Топ-5 отправлен в Telegram")
+            except:
+                print("Ошибка отправки топ-5")
 
         print(f"[{now_str}] Итерация завершена | просканировано {scanned} | уведомлений: {high_prob_count}")
 
